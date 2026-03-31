@@ -7,6 +7,7 @@ Command line trojan
 - 客户端用法：直接编辑好端口打包成exe进行运行
 - 打包命令:nuitka --standalone --onefile --windows-disable-console client.py
 - 拥有截图功能
+-
 
 ![image.png](images/image.png)
 命令在连接后有提示，可以屏幕截图和调用摄像头
