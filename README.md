@@ -12,4 +12,4 @@ Command line trojan
 命令在连接后有提示，可以屏幕截图和调用摄像头
 
 ![received_screenshot.jpg](images/1bafdea80207047e4951ab1dfbfd347.png)
-![received_screenshot.jpg](images/received_screenshot.jpg)
+![received_screenshot.jpg](images/imag.jpg)
