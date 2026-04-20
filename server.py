@@ -2,6 +2,8 @@ import socket
 import threading
 import json
 import time
+import os
+import base64
 from datetime import datetime
 from queue import Queue, Empty
 
@@ -228,6 +230,87 @@ class Server:
         except Exception as e:
             return {'status': 'error', 'message': f'执行命令时出错: {str(e)}'}
 
+    def download_file_from_client(self, mac_address, remote_path, local_path=None):
+        if mac_address not in self.clients:
+            return {'status': 'error', 'message': f'设备 {mac_address} 不在线'}
+
+        if not remote_path:
+            return {'status': 'error', 'message': '远程路径不能为空'}
+
+        client_data = self.clients[mac_address]
+        lock = client_data['lock']
+        with lock:
+            if not self.send_message_to_client(mac_address, {'type': 'download', 'path': remote_path}):
+                return {'status': 'error', 'message': '下载请求发送失败'}
+
+            result = self.receive_message_from_client(mac_address, timeout=60)
+            if not result:
+                return {'status': 'error', 'message': '下载超时，未收到客户端响应'}
+            if result.get('status') != 'success':
+                return result
+
+            data_b64 = result.get('data')
+            if not data_b64:
+                return {'status': 'error', 'message': '客户端返回了空文件数据'}
+
+            try:
+                file_bytes = base64.b64decode(data_b64.encode('utf-8'))
+            except Exception as e:
+                return {'status': 'error', 'message': f'文件解码失败: {e}'}
+
+            save_path = local_path if local_path else os.path.basename(remote_path) or 'downloaded_file'
+            save_path = os.path.abspath(save_path)
+
+            try:
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                with open(save_path, 'wb') as f:
+                    f.write(file_bytes)
+            except Exception as e:
+                return {'status': 'error', 'message': f'写入本地文件失败: {e}'}
+
+            return {
+                'status': 'success',
+                'message': f'下载完成: {remote_path} -> {save_path}',
+                'size': len(file_bytes),
+                'local_path': save_path
+            }
+
+    def upload_file_to_client(self, mac_address, local_path, remote_path=None):
+        if mac_address not in self.clients:
+            return {'status': 'error', 'message': f'设备 {mac_address} 不在线'}
+
+        if not local_path:
+            return {'status': 'error', 'message': '本地路径不能为空'}
+
+        abs_local_path = os.path.abspath(local_path)
+        if not os.path.isfile(abs_local_path):
+            return {'status': 'error', 'message': f'本地文件不存在: {abs_local_path}'}
+
+        try:
+            with open(abs_local_path, 'rb') as f:
+                file_bytes = f.read()
+            data_b64 = base64.b64encode(file_bytes).decode('utf-8')
+        except Exception as e:
+            return {'status': 'error', 'message': f'读取本地文件失败: {e}'}
+
+        target_path = remote_path if remote_path else os.path.basename(abs_local_path)
+
+        client_data = self.clients[mac_address]
+        lock = client_data['lock']
+        with lock:
+            payload = {
+                'type': 'upload',
+                'path': target_path,
+                'data': data_b64
+            }
+            if not self.send_message_to_client(mac_address, payload):
+                return {'status': 'error', 'message': '上传请求发送失败'}
+
+            result = self.receive_message_from_client(mac_address, timeout=60)
+            if not result:
+                return {'status': 'error', 'message': '上传超时，未收到客户端响应'}
+            return result
+
 
 def server_cli(server: Server):
     current_client = None
@@ -237,6 +320,9 @@ def server_cli(server: Server):
     print("  list - 列出所有设备")
     print("  use <mac> - 选择要控制的设备") # MySQL风格
     print("  bye - 退出当前设备会话")
+    print("  在设备会话内可用：")
+    print("    download <远程路径> [本地保存路径] - 从客户端下载文件")
+    print("    upload <本地路径> [远程保存路径] - 上传文件到客户端")
     print("  quit - 退出服务器")
 
     while True:
@@ -268,6 +354,29 @@ def server_cli(server: Server):
                 if user_input.lower() == 'bye':
                     current_client = None
                     print("已返回主菜单")
+                    continue
+
+                if user_input.startswith('download '):
+                    parts = user_input.split(maxsplit=2)
+                    remote_path = parts[1] if len(parts) > 1 else ''
+                    local_path = parts[2] if len(parts) > 2 else None
+                    result = server.download_file_from_client(current_client, remote_path, local_path)
+                    if result.get('status') == 'success':
+                        print(result.get('message', '下载成功'))
+                        print(f"文件大小: {result.get('size', 0)} bytes")
+                    else:
+                        print(f"错误: {result.get('message', '未知错误')}")
+                    continue
+
+                if user_input.startswith('upload '):
+                    parts = user_input.split(maxsplit=2)
+                    local_path = parts[1] if len(parts) > 1 else ''
+                    remote_path = parts[2] if len(parts) > 2 else None
+                    result = server.upload_file_to_client(current_client, local_path, remote_path)
+                    if result.get('status') == 'success':
+                        print(result.get('message', '上传成功'))
+                    else:
+                        print(f"错误: {result.get('message', '未知错误')}")
                     continue
 
                 # 执行客户端命令并获取回显（在某些特殊情况下会失败，比如vim这种交互式场景，大概率想支持的话需要虚拟tty之类的）
