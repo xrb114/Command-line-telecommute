@@ -24,3 +24,32 @@ Corporate remote
 
 ![received_screenshot.jpg](images/1bafdea80207047e4951ab1dfbfd347.png)
 ![received_screenshot.jpg](images/imag.jpg)
+
+
+## 新增：Server Web 可视化面板（含权限控制）
+
+为学校项目新增了一个 server 端只读 Web 面板，默认监听 `127.0.0.1:8080`：
+
+- 登录接口带会话令牌（`X-Session-Token`）
+- 支持查看在线设备列表
+- 支持读取设备基础信息（只读）
+- **不提供 Web 端远程命令执行入口**，降低误用风险
+
+### 启动
+
+```bash
+python3 server.py
+```
+
+### 环境变量
+
+- `PANEL_HOST`：Web 绑定地址（默认 `127.0.0.1`）
+- `PANEL_PORT`：Web 端口（默认 `8080`）
+- `PANEL_USER`：登录用户名（默认 `admin`）
+- `PANEL_PASS`：登录密码（默认 `ChangeMe123!`，**务必修改**）
+
+示例：
+
+```bash
+PANEL_USER=teacher PANEL_PASS='StrongPass!2026' PANEL_HOST=0.0.0.0 PANEL_PORT=8080 python3 server.py
+```

