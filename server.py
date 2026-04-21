@@ -4,12 +4,13 @@ import json
 import time
 import os
 import base64
+import requests
 import secrets
 import hashlib
 from datetime import datetime
 from queue import Queue, Empty
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
+bark="https://bark.xxx.com/"
 
 class Server:
     def __init__(self, host='0.0.0.0', port=9999):
@@ -62,6 +63,8 @@ class Server:
             system_info = client_info.get('system')
 
             print(f"设备 {mac_address} 已连接，用户: {username}")
+            x = requests.get(bark+f"设备 {mac_address} 已连接，用户: {username}")
+            print(f"已发送通知到 Bark，状态码: {x.status_code}")
 
             self.clients[mac_address] = {
                 'socket': client_socket,
@@ -771,8 +774,8 @@ if __name__ == "__main__":
 
     panel = WebControlPanel(
         server=server,
-        host=os.getenv('PANEL_HOST', '127.0.0.1'),
-        port=int(os.getenv('PANEL_PORT', '8080')),
+        host=os.getenv('PANEL_HOST', '0.0.0.0'),
+        port=int(os.getenv('PANEL_PORT', '8088')),
     )
     threading.Thread(target=panel.start, daemon=True).start()
 

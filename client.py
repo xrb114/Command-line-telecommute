@@ -17,7 +17,7 @@ if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w')
 
 class Client:
-    def __init__(self, server_host='localhost', server_port=9999):
+    def __init__(self, server_host='127.0.0.1', server_port=9999):
         self.server_host = server_host
         self.server_port = server_port
         self.client_socket = None
