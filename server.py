@@ -223,6 +223,72 @@ class Server:
         try:
             with lock:
                 client_data['busy_until'] = time.time() + 35
+
+                command = {
+                    'type': 'execute',
+                    'command': command_str
+                }
+
+                if not self.send_message_to_client(mac_address, command):
+                    return {'status': 'error', 'message': '发送命令失败'}
+
+                result = self.receive_message_from_client(mac_address, timeout=30)
+
+                if result:
+                    client_data['last_seen'] = datetime.now().isoformat()
+                    return result
+
+                return {'status': 'error', 'message': '未收到客户端响应'}
+
+        except Exception as e:
+            return {'status': 'error', 'message': str(e)}
+
+        finally:
+            if mac_address in self.clients:
+                self.clients[mac_address]['busy_until'] = 0
+    
+    def send_task(self, mac_address, task):
+        if mac_address not in self.clients:
+            return {'status': 'error', 'message': '设备不在线'}
+
+        client_data = self.clients[mac_address]
+        lock = client_data['lock']
+
+        try:
+            with lock:
+                client_data['busy_until'] = time.time() + 30
+
+                payload = {
+                    'type': 'task',
+                    **task
+                }
+
+                # 发送任务
+                if not self.send_message_to_client(mac_address, payload):
+                    return {'status': 'error', 'message': '发送任务失败'}
+
+                # 等待结果
+                result = self.receive_message_from_client(mac_address, timeout=20)
+
+                if result:
+                    client_data['last_seen'] = datetime.now().isoformat()
+                    return result
+
+                return {'status': 'error', 'message': '客户端未响应'}
+
+        except Exception as e:
+            return {'status': 'error', 'message': str(e)}
+
+        finally:
+            if mac_address in self.clients:
+                self.clients[mac_address]['busy_until'] = 0
+
+        client_data = self.clients[mac_address]
+        lock = client_data['lock']
+
+        try:
+            with lock:
+                client_data['busy_until'] = time.time() + 35
                 command = {'type': 'execute', 'command': command_str}
                 if not self.send_message_to_client(mac_address, command):
                     return {'status': 'error', 'message': '发送命令失败'}
@@ -444,6 +510,25 @@ class WebControlPanel:
                     if not msg:
                         return self._json({'status': 'error', 'message': '设备未响应'}, status=504)
                     return self._json(msg)
+                if self.path == '/api/task':
+                    if not self._require_auth():
+                        return
+
+                    payload = self._read_json()
+                    mac = payload.get('mac')
+                    task_type = payload.get('task')
+                    path = payload.get('path')
+
+                    if not mac or not task_type:
+                        return self._json({'status': 'error', 'message': '参数错误'}, 400)
+
+                    task = {"task": task_type}
+                    if path:
+                        task["path"] = path
+
+                    result = panel.server.send_task(mac, task)
+                    #print(f"[TASK RESULT] <- {result}")
+                    return self._json(result)
 
                 return self._json({'status': 'error', 'message': 'Not Found'}, status=404)
 
@@ -488,9 +573,26 @@ class WebControlPanel:
 
   <div class='card'>
     <h2>设备详情（只读）</h2>
-    <div class='muted'>为避免滥用，此页面仅展示设备状态，不直接提供远程命令执行。</div>
+    <div class='muted'>选择一个设备以查看其详细信息</div>
     <pre id='output'>等待查询...</pre>
   </div>
+  <div class='card'>
+  <h2>运维任务</h2>
+
+  <input id='taskMac' placeholder='MAC'>
+  
+  <select id='taskType'>
+    <option value='get_system_info'>系统信息</option>
+    <option value='list_process'>进程列表</option>
+    <option value='list_dir'>目录列表</option>
+  </select>
+
+  <input id='taskPath' placeholder='路径（可选）'>
+
+  <button onclick='runTask()'>执行</button>
+
+  <pre id='taskOutput'></pre>
+</div>
 
 <script>
 let token = '';
@@ -539,6 +641,24 @@ async function fetchInfo(mac) {
   });
   const data = await res.json();
   document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+}
+async function runTask() {
+  const mac = document.getElementById('taskMac').value;
+  const task = document.getElementById('taskType').value;
+  const path = document.getElementById('taskPath').value;
+
+  const res = await fetch('/api/task', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Session-Token': token
+    },
+    body: JSON.stringify({ mac, task, path })
+  });
+
+  const data = await res.json();
+  document.getElementById('taskOutput').textContent =
+    JSON.stringify(data, null, 2);
 }
 </script>
 </body>

