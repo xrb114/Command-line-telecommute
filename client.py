@@ -182,7 +182,8 @@ class Client:
 
             # 文件传输（可以保留）
             elif ctype == 'download':
-                return self.download_file(command.get('path'))
+                self.download_file_stream(command.get('path'))
+                return None  # ⚠️ 不再走原来的 response 返回
 
             elif ctype == 'upload':
                 return self.upload_file(command.get('path'), command.get('data'))
@@ -307,7 +308,57 @@ class Client:
                 }
         except Exception as e:
             return {'status': 'error', 'command': cmd, 'message': f'cd 命令执行错误: {str(e)}'}
+        
+    def download_file_stream(self, remote_path):
+        try:
+            if not remote_path:
+                self.send_message({'status': 'error', 'message': '路径不能为空'})
+                return
 
+            remote_path = os.path.expanduser(remote_path)
+            if not os.path.isabs(remote_path):
+                remote_path = os.path.join(self.current_directory, remote_path)
+            remote_path = os.path.normpath(remote_path)
+
+            if not os.path.isfile(remote_path):
+                self.send_message({'status': 'error', 'message': f'文件不存在: {remote_path}'})
+                return
+
+            filesize = os.path.getsize(remote_path)
+
+            # 先发送开始信息
+            self.send_message({
+                'type': 'download_start',
+                'status': 'success',
+                'path': remote_path,
+                'size': filesize
+            })
+
+            chunk_size = 1024 * 256  # 256KB
+
+            with open(remote_path, 'rb') as f:
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+
+                    self.send_message({
+                        'type': 'download_chunk',
+                        'data': base64.b64encode(chunk).decode('utf-8')
+                    })
+
+            # 发送结束
+            self.send_message({
+                'type': 'download_end',
+                'status': 'success'
+            })
+
+        except Exception as e:
+            self.send_message({
+                'type': 'download_error',
+                'status': 'error',
+                'message': str(e)
+            })
     def download_file(self, remote_path):
         try:
             if not remote_path:

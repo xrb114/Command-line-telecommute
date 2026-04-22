@@ -10,7 +10,7 @@ import hashlib
 from datetime import datetime
 from queue import Queue, Empty
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-bark="https://bark.xxx.com/"
+bark="https://bark.xxx/"#请替换为你自己的 Bark 服务器地址，末尾需要斜杠
 
 class Server:
     def __init__(self, host='0.0.0.0', port=9999):
@@ -71,7 +71,7 @@ class Server:
                 'lock': threading.Lock(),
                 'info': client_info,
                 'buffer': remainder,
-                'queue': Queue(maxsize=200),
+                'queue': Queue(maxsize=2000),
                 'ip': address[0],
                 'port': address[1],
                 'username': username,
@@ -317,46 +317,78 @@ class Server:
 
         client_data = self.clients[mac_address]
         lock = client_data['lock']
+
         with lock:
             try:
-                client_data['busy_until'] = time.time() + 120
-                if not self.send_message_to_client(mac_address, {'type': 'download', 'path': remote_path}):
+                client_data['busy_until'] = time.time() + 300
+
+                # 发送下载请求
+                if not self.send_message_to_client(mac_address, {
+                    'type': 'download',
+                    'path': remote_path
+                }):
                     return {'status': 'error', 'message': '下载请求发送失败'}
 
-                result = self.receive_message_from_client(mac_address, timeout=120)
-                if not result:
-                    return {'status': 'error', 'message': '下载超时，未收到客户端响应'}
-                if result.get('status') != 'success':
-                    return result
+                file = None
+                save_path = None
+                total_size = 0
+                received_size = 0
 
-                data_b64 = result.get('data')
-                if not data_b64:
-                    return {'status': 'error', 'message': '客户端返回了空文件数据'}
+                start_time = time.time()
 
-                try:
-                    file_bytes = base64.b64decode(data_b64.encode('utf-8'))
-                except Exception as e:
-                    return {'status': 'error', 'message': f'文件解码失败: {e}'}
+                while True:
+                    msg = self.receive_message_from_client(mac_address, timeout=30)
+                    if not msg:
+                        return {'status': 'error', 'message': '下载过程中超时'}
 
-                default_name = os.path.basename(remote_path) or 'downloaded_file'
-                save_path = local_path if local_path else default_name
-                save_path = os.path.abspath(save_path)
-                if os.path.isdir(save_path):
-                    save_path = os.path.join(save_path, default_name)
+                    mtype = msg.get('type')
 
-                try:
-                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-                    with open(save_path, 'wb') as f:
-                        f.write(file_bytes)
-                except Exception as e:
-                    return {'status': 'error', 'message': f'写入本地文件失败: {e}'}
+                    # 开始
+                    if mtype == 'download_start':
+                        total_size = msg.get('size', 0)
+                        filename = os.path.basename(msg.get('path', 'file'))
 
-                return {
-                    'status': 'success',
-                    'message': f'下载完成: {remote_path} -> {save_path}',
-                    'size': len(file_bytes),
-                    'local_path': save_path
-                }
+                        save_path = local_path if local_path else filename
+                        save_path = os.path.abspath(save_path)
+
+                        if os.path.isdir(save_path):
+                            save_path = os.path.join(save_path, filename)
+
+                        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                        file = open(save_path, 'wb')
+
+                        print(f"[下载开始] {filename} ({total_size} bytes)")
+
+                    # 数据块
+                    elif mtype == 'download_chunk':
+                        chunk = base64.b64decode(msg['data'])
+                        file.write(chunk)
+                        received_size += len(chunk)
+
+                        # 简单进度
+                        if total_size > 0:
+                            percent = received_size / total_size * 100
+                            print(f"\r进度: {percent:.2f}% ({received_size}/{total_size})", end='')
+
+                    # 结束
+                    elif mtype == 'download_end':
+                        if file:
+                            file.close()
+                        print("\n下载完成")
+
+                        return {
+                            'status': 'success',
+                            'message': f'下载完成: {save_path}',
+                            'size': received_size,
+                            'local_path': save_path
+                        }
+
+                    # 错误
+                    elif mtype == 'download_error':
+                        if file:
+                            file.close()
+                        return msg
+
             finally:
                 if mac_address in self.clients:
                     self.clients[mac_address]['busy_until'] = 0
@@ -540,132 +572,254 @@ class WebControlPanel:
 
             def _dashboard_html(self):
                 return """<!doctype html>
-<html lang='zh-CN'>
-<head>
-  <meta charset='utf-8'/>
-  <meta name='viewport' content='width=device-width, initial-scale=1'/>
-  <title>Server 控制台</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 24px; background: #f5f7fb; }
-    .card { background: white; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,.06); }
-    input, button { padding: 8px 10px; margin: 4px; }
-    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #eee; font-size: 13px; }
-    .muted { color: #666; font-size: 12px; }
-    pre { background: #111; color: #0f0; padding: 10px; border-radius: 8px; min-height: 36px; }
-  </style>
-</head>
-<body>
-  <div class='card'>
-    <h2>权限登录</h2>
-    <div class='muted'>默认账号 admin，默认密码 ChangeMe123!（请通过环境变量 PANEL_USER / PANEL_PASS 修改）</div>
-    <input id='username' placeholder='用户名' value='admin'>
-    <input id='password' type='password' placeholder='密码'>
-    <button onclick='login()'>登录</button>
-    <span id='loginStatus'></span>
-  </div>
+        <!doctype html>
+        <html lang="zh-CN">
+        <head>
+        <meta charset="utf-8"/>
+        <meta name="viewport" content="width=device-width, initial-scale=1"/>
+        <title>Control Panel</title>
 
-  <div class='card'>
-    <h2>在线设备</h2>
-    <button onclick='refreshClients()'>刷新列表</button>
-    <table>
-      <thead><tr><th>MAC</th><th>IP</th><th>用户</th><th>系统</th><th>最后心跳</th><th>操作</th></tr></thead>
-      <tbody id='clients'></tbody>
-    </table>
-  </div>
+        <style>
+        body {
+        margin: 0;
+        font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto;
+        background: linear-gradient(135deg,#0f2027,#203a43,#2c5364);
+        color: #fff;
+        }
 
-  <div class='card'>
-    <h2>设备详情（只读）</h2>
-    <div class='muted'>选择一个设备以查看其详细信息</div>
-    <pre id='output'>等待查询...</pre>
-  </div>
-  <div class='card'>
-  <h2>运维任务</h2>
+        .container {
+        padding: 24px;
+        max-width: 1200px;
+        margin: auto;
+        }
 
-  <input id='taskMac' placeholder='MAC'>
-  
-  <select id='taskType'>
-    <option value='get_system_info'>系统信息</option>
-    <option value='list_process'>进程列表</option>
-    <option value='list_dir'>目录列表</option>
-  </select>
+        .card {
+        background: rgba(255,255,255,0.05);
+        backdrop-filter: blur(16px);
+        border-radius: 16px;
+        padding: 20px;
+        margin-bottom: 20px;
+        box-shadow: 0 10px 40px rgba(0,0,0,.4);
+        }
 
-  <input id='taskPath' placeholder='路径（可选）'>
+        h2 { margin-top: 0; }
 
-  <button onclick='runTask()'>执行</button>
+        input, select {
+        padding: 10px;
+        border-radius: 10px;
+        border: none;
+        margin: 5px;
+        background: rgba(255,255,255,0.1);
+        color: #fff;
+        }
 
-  <pre id='taskOutput'></pre>
-</div>
+        button {
+        padding: 10px 16px;
+        border-radius: 10px;
+        border: none;
+        background: linear-gradient(135deg,#4facfe,#00f2fe);
+        color: #fff;
+        cursor: pointer;
+        transition: .2s;
+        }
+        button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 6px 20px rgba(0,0,0,.4);
+        }
 
-<script>
-let token = '';
+        table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 10px;
+        }
 
-async function login() {
-  const res = await fetch('/api/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      username: document.getElementById('username').value,
-      password: document.getElementById('password').value
-    })
-  });
-  const data = await res.json();
-  if (data.status === 'success') {
-    token = data.token;
-    document.getElementById('loginStatus').innerText = '登录成功';
-    refreshClients();
-  } else {
-    document.getElementById('loginStatus').innerText = '登录失败';
-  }
-}
+        th, td {
+        padding: 10px;
+        border-bottom: 1px solid rgba(255,255,255,0.1);
+        font-size: 13px;
+        }
 
-async function refreshClients() {
-  const res = await fetch('/api/clients', { headers: { 'X-Session-Token': token } });
-  const data = await res.json();
-  const tbody = document.getElementById('clients');
-  tbody.innerHTML = '';
-  if (data.status !== 'success') return;
+        tr:hover {
+        background: rgba(255,255,255,0.05);
+        }
 
-  data.data.forEach(c => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${c.mac}</td><td>${c.ip}</td><td>${c.username}</td><td>${c.system}</td><td>${c.last_seen}</td><td><button onclick="fetchInfo('${c.mac}')">读取信息</button></td>`;
-    tbody.appendChild(tr);
-  });
-}
+        .status-online { color: #00ff9c; }
+        .status-offline { color: #ff5c5c; }
 
-async function fetchInfo(mac) {
-  const res = await fetch('/api/client/info', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Session-Token': token
-    },
-    body: JSON.stringify({ mac })
-  });
-  const data = await res.json();
-  document.getElementById('output').textContent = JSON.stringify(data, null, 2);
-}
-async function runTask() {
-  const mac = document.getElementById('taskMac').value;
-  const task = document.getElementById('taskType').value;
-  const path = document.getElementById('taskPath').value;
+        pre {
+        background: #000;
+        color: #00ff00;
+        padding: 12px;
+        border-radius: 10px;
+        max-height: 300px;
+        overflow: auto;
+        }
 
-  const res = await fetch('/api/task', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Session-Token': token
-    },
-    body: JSON.stringify({ mac, task, path })
-  });
+        .topbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        }
 
-  const data = await res.json();
-  document.getElementById('taskOutput').textContent =
-    JSON.stringify(data, null, 2);
-}
-</script>
-</body>
-</html>"""
+        .badge {
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: rgba(0,255,150,0.2);
+        font-size: 12px;
+        }
+
+        </style>
+        </head>
+
+        <body>
+        <div class="container">
+
+        <!-- 登录 -->
+        <div class="card">
+        <h2>登录</h2>
+        <input id="username" value="admin">
+        <input id="password" type="password" placeholder="密码">
+        <button onclick="login()">登录</button>
+        <span id="loginStatus"></span>
+        </div>
+
+        <!-- 设备 -->
+        <div class="card">
+        <div class="topbar">
+            <h2>在线设备</h2>
+            <div>
+            <button onclick="refreshClients()">刷新</button>
+            <span class="badge" id="count">0 台设备</span>
+            </div>
+        </div>
+
+        <table>
+            <thead>
+            <tr>
+                <th>MAC</th>
+                <th>IP</th>
+                <th>用户</th>
+                <th>系统</th>
+                <th>状态</th>
+                <th>操作</th>
+            </tr>
+            </thead>
+            <tbody id="clients"></tbody>
+        </table>
+        </div>
+
+        <!-- 运维 -->
+        <div class="card">
+        <h2>运维任务</h2>
+
+        <select id="taskMac"></select>
+
+        <select id="taskType">
+            <option value="get_system_info">系统信息</option>
+            <option value="list_process">进程列表</option>
+            <option value="list_dir">目录列表</option>
+        </select>
+
+        <input id="taskPath" placeholder="路径（可选）">
+
+        <button onclick="runTask()">执行</button>
+
+        <pre id="taskOutput">等待执行...</pre>
+        </div>
+
+        </div>
+
+        <script>
+        let token = "";
+        let clientsCache = [];
+
+        async function login(){
+        const res = await fetch('/api/login',{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({
+            username:username.value,
+            password:password.value
+            })
+        });
+
+        const data = await res.json();
+
+        if(data.status === 'success'){
+            token = data.token;
+            loginStatus.innerText = "登录成功";
+            refreshClients();
+            setInterval(refreshClients, 5000);
+        }else{
+            loginStatus.innerText = "登录失败";
+        }
+        }
+
+        async function refreshClients(){
+        const res = await fetch('/api/clients',{
+            headers:{'X-Session-Token':token}
+        });
+
+        const data = await res.json();
+        if(data.status !== 'success') return;
+
+        clientsCache = data.data;
+
+        clients.innerHTML = "";
+        taskMac.innerHTML = "";
+
+        document.getElementById("count").innerText = clientsCache.length + " 台设备";
+
+        clientsCache.forEach(c => {
+
+            // 表格
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+            <td>${c.mac}</td>
+            <td>${c.ip}</td>
+            <td>${c.username}</td>
+            <td>${c.system}</td>
+            <td class="status-online">在线</td>
+            <td><button onclick="selectDevice('${c.mac}')">选择</button></td>
+            `;
+            clients.appendChild(tr);
+
+            // 下拉
+            const opt = document.createElement("option");
+            opt.value = c.mac;
+            opt.textContent = `${c.mac} (${c.username})`;
+            taskMac.appendChild(opt);
+        });
+        }
+
+        function selectDevice(mac){
+        taskMac.value = mac;
+        }
+
+        async function runTask(){
+        taskOutput.textContent = "执行中...";
+
+        const res = await fetch('/api/task',{
+            method:'POST',
+            headers:{
+            'Content-Type':'application/json',
+            'X-Session-Token':token
+            },
+            body:JSON.stringify({
+            mac:taskMac.value,
+            task:taskType.value,
+            path:taskPath.value
+            })
+        });
+
+        const data = await res.json();
+
+        taskOutput.textContent = JSON.stringify(data,null,2);
+        }
+        </script>
+
+        </body>
+        </html>"""
 
         httpd = ThreadingHTTPServer((self.host, self.port), Handler)
         print(f"Web 控制台启动：http://{self.host}:{self.port}")
